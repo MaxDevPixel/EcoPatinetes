@@ -1,0 +1,7 @@
+{
+  "name": "Eco Mobilidade",
+  "description": "Um aplicativo para gerenciar o aluguel de patinetes elétricos e brinquedos de pelúcia, com um formulário de aluguel para clientes via QR code e um painel de administração completo para gerenciamento de itens e aluguéis.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
