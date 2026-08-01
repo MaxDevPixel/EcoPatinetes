@@ -1,0 +1,494 @@
+
+
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { getItemsWithRentals, createItem, checkSupabaseConnection, supabase } from '../services/supabase';
+import type { CombinedItem } from '../types';
+import { ItemType } from '../types';
+import ItemCard from './ItemCard';
+import Modal from './Modal';
+import { useAuth } from '../hooks/useAuth';
+import { PlusIcon, ChartBarIcon, CubeIcon, ClockIcon, BugAntIcon } from '@heroicons/react/24/solid';
+import { ArrowPathIcon } from '@heroicons/react/24/outline';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import RentalHistoryView from './RentalHistoryView';
+import DebugView from './DebugView';
+
+
+// --- Dashboard View Component ---
+const DashboardView: React.FC = () => {
+    const [period, setPeriod] = useState('7d');
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [timeSeriesData, setTimeSeriesData] = useState<any[]>([]);
+    const [topItemsData, setTopItemsData] = useState<any[]>([]);
+    const [heatmapData, setHeatmapData] = useState<Record<string, Record<string, number>> | null>(null);
+    const [kpi, setKpi] = useState({ totalRevenue: 0, totalRentals: 0 });
+
+    const { startDate, endDate, interval, start, end } = useMemo(() => {
+        const end = new Date();
+        const start = new Date();
+        let int: 'day' | 'month' | 'year' = 'day';
+
+        // Define o horário para o final do dia atual para garantir que todos os registros do dia sejam incluídos.
+        end.setHours(23, 59, 59, 999);
+
+        switch (period) {
+            case 'today':
+                // 'start' and 'end' are already today by default.
+                break;
+            case '7d':
+                start.setDate(end.getDate() - 6);
+                break;
+            case '30d':
+                start.setDate(end.getDate() - 29);
+                break;
+            case 'this_month':
+                start.setDate(1);
+                break;
+            case 'this_year':
+                start.setMonth(0, 1);
+                int = 'month';
+                break;
+        }
+        // Define o horário para o início do dia para garantir a precisão do intervalo.
+        start.setHours(0, 0, 0, 0);
+        
+        return { 
+            startDate: start.toISOString(), 
+            endDate: end.toISOString(),
+            interval: int,
+            start,
+            end
+        };
+    }, [period]);
+
+    const fetchData = useCallback(async () => {
+        setLoading(true);
+        setError(null);
+        try {
+            // 1. Busca todos os dados de aluguéis finalizados no período.
+            const { data: rentalsData, error: rentalsError } = await supabase
+                .from('rentals')
+                .select('total_cost, end_time, items!inner(id, id_visual, type)')
+                .gte('end_time', startDate)
+                .lte('end_time', endDate)
+                .not('total_cost', 'is', null)
+                .not('end_time', 'is', null);
+
+            if (rentalsError) throw rentalsError;
+            const rentals = Array.isArray(rentalsData) ? rentalsData : [];
+
+            // 2. Processa dados para o gráfico de Lucro por Período.
+            const buckets = new Map<string, number>();
+            let current = new Date(start);
+            while (current <= end) {
+                const key = (interval === 'month')
+                    ? current.toLocaleDateString('pt-BR', { month: 'short' })
+                    : current.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+                if (!buckets.has(key)) buckets.set(key, 0);
+                
+                if (interval === 'month') current.setMonth(current.getMonth() + 1);
+                else current.setDate(current.getDate() + 1);
+            }
+            
+            rentals.forEach(rental => {
+                if (rental.total_cost && rental.end_time) {
+                    const date = new Date(rental.end_time);
+                    const key = (interval === 'month')
+                        ? date.toLocaleDateString('pt-BR', { month: 'short' })
+                        : date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+                    buckets.set(key, (buckets.get(key) || 0) + rental.total_cost);
+                }
+            });
+            
+            const formattedTimeSeries = Array.from(buckets.entries()).map(([name, Lucro]) => ({ name, Lucro }));
+            setTimeSeriesData(formattedTimeSeries);
+
+            // 3. Processa dados para o gráfico de Itens Mais Rentáveis.
+            const revenueByItem = rentals.reduce<Record<string, number>>((acc, rental) => {
+                if (rental.items && typeof rental.total_cost === 'number') {
+                    const key = `${rental.items.type} #${rental.items.id_visual}`;
+                    acc[key] = (acc[key] || 0) + rental.total_cost;
+                }
+                return acc;
+            }, {});
+
+            const formattedTopItems = Object.entries(revenueByItem)
+                .map(([name, revenue]) => ({ name, Lucro: revenue }))
+                .sort((a, b) => b.Lucro - a.Lucro)
+                .slice(0, 10);
+            setTopItemsData(formattedTopItems);
+            
+            // 4. Calcula KPIs
+            const totalRevenue = rentals.reduce((sum, r) => sum + (r.total_cost || 0), 0);
+            const totalRentals = rentals.length;
+            setKpi({ totalRevenue, totalRentals });
+
+            // 5. Processa dados para o Mapa de Calor
+            const { data: allItems, error: itemsError } = await supabase
+                .from('items')
+                .select('id, id_visual, type')
+                .order('id', { ascending: true });
+            if (itemsError) throw itemsError;
+
+
+            const daysOfWeek = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
+            const initialDailyProfit = { Dom: 0, Seg: 0, Ter: 0, Qua: 0, Qui: 0, Sex: 0, Sáb: 0 };
+            const profitByItemDay: Record<string, Record<string, number>> = {};
+
+            allItems?.forEach(item => {
+                const key = `${item.type} #${item.id_visual}`;
+                profitByItemDay[key] = { ...initialDailyProfit };
+            });
+
+            rentals.forEach(rental => {
+                if (rental.items && typeof rental.total_cost === 'number' && rental.end_time) {
+                    const key = `${rental.items.type} #${rental.items.id_visual}`;
+                    const dayIndex = new Date(rental.end_time).getDay();
+                    const dayName = daysOfWeek[dayIndex];
+                    
+                    if (profitByItemDay[key]) {
+                        profitByItemDay[key][dayName] += rental.total_cost;
+                    }
+                }
+            });
+            
+            setHeatmapData(profitByItemDay);
+
+        } catch (err: any) {
+            setError(err.message || 'Falha ao buscar dados do dashboard.');
+            console.error(err);
+        } finally {
+            setLoading(false);
+        }
+    }, [startDate, endDate, interval, start, end]);
+
+    useEffect(() => {
+        fetchData();
+    }, [fetchData]);
+
+    const renderHeatmap = () => {
+        if (!heatmapData || Object.keys(heatmapData).length === 0) {
+            return <p className="text-slate-500 text-center py-8">Não há dados de itens para exibir o mapa de calor.</p>;
+        }
+
+        const daysOfWeek = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
+        const itemNames = Object.keys(heatmapData);
+        
+        const maxProfit = Math.max(1, ...Object.values(heatmapData).flatMap(dayData => Object.values(dayData)));
+
+        const getHeatmapColor = (value: number) => {
+            if (value <= 0) return 'bg-slate-100 text-slate-400';
+            
+            // Usando uma escala logarítmica para aumentar a sensibilidade em valores mais baixos,
+            // tornando as mudanças de cor mais perceptíveis para lucros menores.
+            // Math.log1p(x) é Math.log(1 + x), evitando problemas com log(0) e tratando valores pequenos.
+            const intensity = Math.log1p(value) / Math.log1p(maxProfit);
+
+            if (intensity > 0.85) return 'bg-green-900 text-white';
+            if (intensity > 0.70) return 'bg-green-800 text-white';
+            if (intensity > 0.55) return 'bg-green-700 text-white';
+            if (intensity > 0.40) return 'bg-green-600 text-white';
+            if (intensity > 0.25) return 'bg-green-500 text-white';
+            if (intensity > 0.10) return 'bg-green-300 text-slate-800';
+            return 'bg-green-200 text-slate-700';
+        };
+
+
+        return (
+            <div className="overflow-x-auto">
+                <div className="inline-block min-w-full align-middle">
+                    <div className="grid grid-cols-8 gap-1 text-center font-mono">
+                        <div className="font-semibold text-sm"></div>
+                        {daysOfWeek.map(day => <div key={day} className="font-semibold text-sm py-2">{day}</div>)}
+
+                        {itemNames.map(itemName => (
+                            <React.Fragment key={itemName}>
+                                <div className="font-semibold text-sm text-right pr-2 py-2 whitespace-nowrap">{itemName.replace('Patinete #', 'P#').replace('Pelúcia #', 'L#')}</div>
+                                {daysOfWeek.map(day => {
+                                    const profit = heatmapData[itemName][day];
+                                    return (
+                                        <div 
+                                            key={day}
+                                            title={`${itemName} - ${day}: R$ ${profit.toFixed(2)}`}
+                                            className={`rounded-md p-2 flex items-center justify-center text-xs ${getHeatmapColor(profit)}`}
+                                        >
+                                           {profit > 0 ? `R$${profit.toFixed(0)}` : '-'}
+                                        </div>
+                                    );
+                                })}
+                            </React.Fragment>
+                        ))}
+                    </div>
+                </div>
+            </div>
+        );
+    };
+    
+    const renderContent = () => {
+        if (loading) return <p>Carregando dados do dashboard...</p>;
+        if (error) return <div className="bg-red-100 border-l-4 border-red-500 text-red-700 p-4" role="alert"><p className="font-bold">Erro:</p><p>{error}</p></div>;
+
+        return (
+            <div className="space-y-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="bg-white p-6 rounded-lg shadow-md border">
+                        <h3 className="text-lg font-semibold text-slate-700">Lucro Total no Período</h3>
+                        <p className="text-4xl font-bold text-teal-600 mt-2">
+                           R$ {kpi.totalRevenue.toFixed(2)}
+                        </p>
+                    </div>
+                     <div className="bg-white p-6 rounded-lg shadow-md border">
+                        <h3 className="text-lg font-semibold text-slate-700">Total de Aluguéis (Finalizados)</h3>
+                        <p className="text-4xl font-bold text-indigo-600 mt-2">{kpi.totalRentals}</p>
+                    </div>
+                </div>
+
+                <div className="bg-white p-6 rounded-lg shadow-md border">
+                    <h3 className="text-xl font-semibold text-slate-800 mb-4">Lucro por Período</h3>
+                    <div style={{ width: '100%', height: 300 }}>
+                        <ResponsiveContainer>
+                            <BarChart data={timeSeriesData} margin={{ top: 5, right: 20, left: -10, bottom: 5 }}>
+                                <CartesianGrid strokeDasharray="3 3" />
+                                <XAxis dataKey="name" />
+                                <YAxis />
+                                <Tooltip formatter={(value: number) => [`R$ ${value.toFixed(2)}`, 'Lucro']} />
+                                <Bar dataKey="Lucro" fill="#0d9488" />
+                            </BarChart>
+                        </ResponsiveContainer>
+                    </div>
+                </div>
+
+                <div className="bg-white p-6 rounded-lg shadow-md border">
+                    <h3 className="text-xl font-semibold text-slate-800 mb-4">Mapa de Calor de Lucro (Todos os Itens)</h3>
+                    {renderHeatmap()}
+                </div>
+
+                 <div className="bg-white p-6 rounded-lg shadow-md border">
+                    <h3 className="text-xl font-semibold text-slate-800 mb-4">Itens Mais Rentáveis</h3>
+                    <div style={{ width: '100%', height: 300 }}>
+                         <ResponsiveContainer>
+                            <BarChart data={topItemsData} layout="vertical" margin={{ top: 5, right: 20, left: 30, bottom: 5 }}>
+                                <CartesianGrid strokeDasharray="3 3" />
+                                <XAxis type="number" hide />
+                                <YAxis type="category" dataKey="name" width={120} />
+                                <Tooltip formatter={(value: number) => [`R$ ${value.toFixed(2)}`, 'Lucro']} />
+                                <Bar dataKey="Lucro" fill="#4f46e5" />
+                            </BarChart>
+                        </ResponsiveContainer>
+                    </div>
+                </div>
+            </div>
+        )
+    }
+
+    return (
+        <div>
+            <div className="mb-6 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                    <button onClick={() => setPeriod('today')} className={`px-4 py-2 rounded-md font-semibold ${period === 'today' ? 'bg-indigo-600 text-white' : 'bg-white shadow-sm hover:bg-slate-50'}`}>Hoje</button>
+                    <button onClick={() => setPeriod('7d')} className={`px-4 py-2 rounded-md font-semibold ${period === '7d' ? 'bg-indigo-600 text-white' : 'bg-white shadow-sm hover:bg-slate-50'}`}>Últimos 7 dias</button>
+                    <button onClick={() => setPeriod('30d')} className={`px-4 py-2 rounded-md font-semibold ${period === '30d' ? 'bg-indigo-600 text-white' : 'bg-white shadow-sm hover:bg-slate-50'}`}>Últimos 30 dias</button>
+                    <button onClick={() => setPeriod('this_month')} className={`px-4 py-2 rounded-md font-semibold ${period === 'this_month' ? 'bg-indigo-600 text-white' : 'bg-white shadow-sm hover:bg-slate-50'}`}>Este Mês</button>
+                    <button onClick={() => setPeriod('this_year')} className={`px-4 py-2 rounded-md font-semibold ${period === 'this_year' ? 'bg-indigo-600 text-white' : 'bg-white shadow-sm hover:bg-slate-50'}`}>Este Ano</button>
+                </div>
+                 <button 
+                    onClick={fetchData} 
+                    disabled={loading}
+                    className="p-2 rounded-full text-slate-600 hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    aria-label="Atualizar dados do dashboard"
+                >
+                    <ArrowPathIcon className={`w-6 h-6 ${loading ? 'animate-spin' : ''}`}/>
+                </button>
+            </div>
+            {renderContent()}
+        </div>
+    );
+};
+
+
+// --- Items View Component ---
+const ItemsView: React.FC = () => {
+    const [items, setItems] = useState<CombinedItem[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [isAddModalOpen, setAddModalOpen] = useState(false);
+    const [supabaseStatus] = useState(checkSupabaseConnection());
+    
+    const fetchItems = useCallback(async (isInitialLoad = false) => {
+        if (!supabaseStatus.isConnected) {
+            setError(supabaseStatus.message);
+            setLoading(false);
+            return;
+        }
+        
+        if (isInitialLoad) setLoading(true);
+        setError(null);
+        try {
+            const data = await getItemsWithRentals();
+            setItems(data);
+        } catch (e: any) {
+            setError(e.message || 'Falha ao buscar os dados.');
+            console.error(e);
+        } finally {
+            if (isInitialLoad) setLoading(false);
+        }
+    }, [supabaseStatus]);
+
+    useEffect(() => {
+        fetchItems(true);
+
+        const channel = supabase
+            .channel('db-changes-items-rentals')
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'items' }, () => fetchItems())
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'rentals' }, () => fetchItems())
+            .subscribe();
+
+        return () => {
+            supabase.removeChannel(channel);
+        };
+    }, [fetchItems]);
+
+    return (
+        <div>
+             <div className="flex justify-end items-center mb-6">
+                 <button onClick={() => setAddModalOpen(true)} className="bg-indigo-600 text-white font-semibold py-2 px-4 rounded-lg shadow-md hover:bg-indigo-700 transition-colors flex items-center gap-2">
+                    <PlusIcon className="w-5 h-5"/>
+                    Adicionar Item
+                </button>
+            </div>
+            {loading && <p>Carregando itens...</p>}
+            {error && <div className="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 mb-4" role="alert"><p className="font-bold">Erro:</p><p>{error}</p></div>}
+            
+            {!loading && !error && (
+                 items.length > 0 ? (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                        {items.map(item => <ItemCard key={item.id} item={item} onRefresh={fetchItems} />)}
+                    </div>
+                ) : (
+                    <div className="text-center py-10 bg-white rounded-lg shadow-md border">
+                        <h3 className="text-xl font-semibold text-slate-700">Nenhum item encontrado</h3>
+                        <p className="text-slate-500 mt-2">Adicione seu primeiro item para começar a gerenciar.</p>
+                    </div>
+                )
+            )}
+            
+            <Modal isOpen={isAddModalOpen} onClose={() => setAddModalOpen(false)}>
+                <AddItemForm onClose={() => setAddModalOpen(false)} onRefresh={fetchItems} />
+            </Modal>
+        </div>
+    );
+};
+
+
+// --- Add Item Form Component (used in ItemsView) ---
+const AddItemForm: React.FC<{onClose: () => void, onRefresh: () => void}> = ({onClose, onRefresh}) => {
+    const [type, setType] = useState<ItemType>(ItemType.Patinete);
+    const [price, setPrice] = useState<string>('');
+    const [error, setError] = useState('');
+    const [loading, setLoading] = useState(false);
+
+    const handleSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setError('');
+        const priceNum = parseFloat(price);
+        if (isNaN(priceNum) || priceNum <= 0) {
+            setError('Por favor, insira um preço válido e positivo.');
+            return;
+        }
+        setLoading(true);
+        try {
+            await createItem(type, priceNum);
+            onRefresh();
+            onClose();
+        } catch(err: any) {
+            setError(err.message || 'Falha ao adicionar o item. Por favor, tente novamente.');
+            console.error(err);
+        } finally {
+            setLoading(false);
+        }
+    }
+
+    return (
+        <form onSubmit={handleSubmit}>
+            <h3 className="text-xl font-semibold mb-4">Adicionar Novo Item</h3>
+            {error && <p className="bg-red-100 text-red-700 p-2 rounded mb-4">{error}</p>}
+            <div className="mb-4">
+                <label htmlFor="type" className="block text-sm font-medium text-slate-700 mb-1">Tipo do Item</label>
+                <select id="type" value={type} onChange={e => setType(e.target.value as ItemType)} className="w-full p-2 border bg-white text-slate-900 border-slate-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500">
+                    <option value={ItemType.Patinete}>Patinete</option>
+                    <option value={ItemType.Pelucia}>Pelúcia</option>
+                </select>
+            </div>
+            <div className="mb-6">
+                <label htmlFor="price" className="block text-sm font-medium text-slate-700 mb-1">Preço por Minuto (R$)</label>
+                <input type="number" id="price" value={price} onChange={e => setPrice(e.target.value)} step="0.01" min="0.01" placeholder="ex: 1.50" className="w-full p-2 border bg-white text-slate-900 placeholder:text-slate-400 border-slate-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500" required />
+            </div>
+            <div className="flex justify-end gap-3">
+                <button type="button" onClick={onClose} className="py-2 px-4 bg-slate-200 text-slate-800 rounded-md hover:bg-slate-300">Cancelar</button>
+                <button type="submit" disabled={loading} className="py-2 px-4 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 disabled:bg-indigo-300">
+                    {loading ? 'Adicionando...' : 'Adicionar Item'}
+                </button>
+            </div>
+        </form>
+    );
+};
+
+
+// --- Main AdminDashboard Component ---
+const AdminDashboard: React.FC = () => {
+    const { logout } = useAuth();
+    const [activeTab, setActiveTab] = useState<'items' | 'dashboard' | 'history' | 'debug'>('items');
+
+    return (
+        <div>
+            <div className="flex justify-between items-center mb-6">
+                <h1 className="text-3xl font-bold">Painel do Administrador</h1>
+                <button onClick={logout} className="bg-slate-600 text-white font-semibold py-2 px-4 rounded-lg shadow-md hover:bg-slate-700 transition-colors">
+                    Sair
+                </button>
+            </div>
+
+            <div className="border-b border-slate-200 mb-6">
+                <nav className="-mb-px flex space-x-6" aria-label="Tabs">
+                    <button
+                        onClick={() => setActiveTab('items')}
+                        className={`group inline-flex items-center py-4 px-1 border-b-2 font-medium text-sm gap-2 ${activeTab === 'items' ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}
+                    >
+                        <CubeIcon className="w-5 h-5" />
+                        <span>Gerenciar Itens</span>
+                    </button>
+                    <button
+                        onClick={() => setActiveTab('dashboard')}
+                        className={`group inline-flex items-center py-4 px-1 border-b-2 font-medium text-sm gap-2 ${activeTab === 'dashboard' ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}
+                    >
+                        <ChartBarIcon className="w-5 h-5" />
+                        <span>Dashboard</span>
+                    </button>
+                     <button
+                        onClick={() => setActiveTab('history')}
+                        className={`group inline-flex items-center py-4 px-1 border-b-2 font-medium text-sm gap-2 ${activeTab === 'history' ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}
+                    >
+                        <ClockIcon className="w-5 h-5" />
+                        <span>Histórico de Aluguéis</span>
+                    </button>
+                    <button
+                        onClick={() => setActiveTab('debug')}
+                        className={`group inline-flex items-center py-4 px-1 border-b-2 font-medium text-sm gap-2 ${activeTab === 'debug' ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}
+                    >
+                        <BugAntIcon className="w-5 h-5" />
+                        <span>Debug</span>
+                    </button>
+                </nav>
+            </div>
+            
+            {activeTab === 'items' && <ItemsView />}
+            {activeTab === 'dashboard' && <DashboardView />}
+            {activeTab === 'history' && <RentalHistoryView />}
+            {activeTab === 'debug' && <DebugView />}
+            
+        </div>
+    );
+};
+
+export default AdminDashboard;
