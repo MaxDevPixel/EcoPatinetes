@@ -1,7 +1,5 @@
-
-
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { getItemsWithRentals, createItem, checkSupabaseConnection, supabase } from '../services/supabase';
+import { getItemsWithRentals, createItem, checkSupabaseConnection } from '../services/supabase';
 import type { CombinedItem } from '../types';
 import { ItemType } from '../types';
 import ItemCard from './ItemCard';
@@ -337,16 +335,6 @@ const ItemsView: React.FC = () => {
 
     useEffect(() => {
         fetchItems(true);
-
-        const channel = supabase
-            .channel('db-changes-items-rentals')
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'items' }, () => fetchItems())
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'rentals' }, () => fetchItems())
-            .subscribe();
-
-        return () => {
-            supabase.removeChannel(channel);
-        };
     }, [fetchItems]);
 
     return (
