@@ -1,8 +1,7 @@
-
 import React from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import RentalForm from '../components/RentalForm';
-import { getItemById, checkSupabaseConnection, startRental, supabase } from '../services/supabase';
+import { getItemById, checkSupabaseConnection, startRental } from '../services/supabase';
 import type { RentalItem, ActiveRental } from '../types';
 import { ItemStatus } from '../types';
 
@@ -88,8 +87,6 @@ const RentalPage: React.FC = () => {
     const [supabaseStatus] = React.useState(checkSupabaseConnection());
 
     React.useEffect(() => {
-        let channel: any = null;
-
         const initialize = async () => {
             setView('loading');
             if (!itemId) {
@@ -124,26 +121,6 @@ const RentalPage: React.FC = () => {
                 
                 setItem(fetchedItem);
 
-                // Otimização: Escuta em tempo real por mudanças no status do item.
-                // Se o item for alugado enquanto o cliente preenche o formulário,
-                // a UI é atualizada instantaneamente para evitar um erro na submissão.
-                channel = supabase
-                    .channel(`item-status-check-${itemId}`)
-                    .on<RentalItem>(
-                        'postgres_changes',
-                        { event: 'UPDATE', schema: 'public', table: 'items', filter: `id=eq.${itemId}` },
-                        (payload) => {
-                            if (payload.new && payload.new.status === ItemStatus.Rented) {
-                                setError('Ops! Alguém foi mais rápido. Este item acabou de ser alugado. Por favor, escaneie outro item.');
-                                setView('error');
-                                if (sessionStorage.getItem('lastRentalCustomer')) {
-                                    sessionStorage.removeItem('lastRentalCustomer');
-                                }
-                            }
-                        }
-                    )
-                    .subscribe();
-
                 const storedCustomer = sessionStorage.getItem('lastRentalCustomer');
                 if (storedCustomer) {
                     setCustomerData(JSON.parse(storedCustomer));
@@ -160,13 +137,6 @@ const RentalPage: React.FC = () => {
         };
 
         initialize();
-
-        // Limpa a inscrição do canal ao desmontar o componente para evitar vazamentos de memória.
-        return () => {
-            if (channel) {
-                supabase.removeChannel(channel);
-            }
-        };
     }, [itemId, supabaseStatus]);
 
     const handleSuccess = (customer: CustomerData, newRental: ActiveRental) => {
