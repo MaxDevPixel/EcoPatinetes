@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { getItemsWithRentals, createItem, checkSupabaseConnection } from '../services/supabase';
+import { getItemsWithRentals, createItem, checkSupabaseConnection, supabase } from '../services/supabase';
 import type { CombinedItem } from '../types';
 import { ItemType } from '../types';
 import ItemCard from './ItemCard';
