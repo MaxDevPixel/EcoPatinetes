@@ -1,8 +1,6 @@
-
-
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
-import { supabase, getActiveRentalsByCpf } from '../services/supabase';
+import { getActiveRentalsByCpf } from '../services/supabase';
 import type { RentalWithItem } from '../types';
 import { ClockIcon, CurrencyDollarIcon, InformationCircleIcon } from '@heroicons/react/24/outline';
 import { QrCodeIcon } from '@heroicons/react/24/solid';
@@ -147,19 +145,6 @@ const TrackingPage: React.FC = () => {
         };
 
         initialLoad();
-
-        const channel = supabase
-            .channel(`customer-rentals-${decodedCpf}`)
-            .on(
-                'postgres_changes',
-                { event: '*', schema: 'public', table: 'rentals', filter: `customer_cpf=eq.${decodedCpf}` },
-                () => fetchRentals()
-            )
-            .subscribe();
-
-        return () => {
-            supabase.removeChannel(channel);
-        };
     }, [customerCpf]);
 
     const handleScanSuccess = (decodedText: string) => {
