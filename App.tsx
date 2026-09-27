@@ -1,6 +1,7 @@
 
 import React from 'react';
 import { MemoryRouter, HashRouter, Routes, Route, Link } from 'react-router-dom';
+import { Analytics } from '@vercel/analytics/react';
 import AdminPage from './pages/AdminPage';
 import RentalPage from './pages/RentalPage';
 import HomePage from './pages/HomePage';
@@ -31,6 +32,7 @@ function App() {
             <p>@Criado por Max Oliveira (94) 9 9969-7321</p>
           </footer>
         </div>
+        <Analytics />
       </HashRouter>
     </AuthProvider>
   );
